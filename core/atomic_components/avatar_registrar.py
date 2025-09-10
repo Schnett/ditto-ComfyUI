@@ -1,6 +1,7 @@
 import numpy as np
+import cv2
 
-from .loader import load_source_frames
+from .loader import load_source_frames, check_resize
 from .source2info import Source2Info
 
 
@@ -60,7 +61,7 @@ class AvatarRegistrar:
 
     def register(
         self,
-        source_path,  # image | video
+        source,  # path | list[np.ndarray(H,W,3)] | np.ndarray[T,H,W,3] | np.ndarray[H,W,3]
         max_dim=1920,
         n_frames=-1,
         **kwargs,
@@ -72,7 +73,41 @@ class AvatarRegistrar:
             crop_vy_ratio: -0.125
             crop_flag_do_rot: True
         """
-        rgb_list, is_image_flag = load_source_frames(source_path, max_dim=max_dim, n_frames=n_frames)
+        # Accept either a file path or preloaded frames
+        if isinstance(source, str):
+            rgb_list, is_image_flag = load_source_frames(source, max_dim=max_dim, n_frames=n_frames)
+        else:
+            # Normalize frames to list of uint8 RGB arrays
+            if isinstance(source, np.ndarray):
+                if source.ndim == 3:
+                    source = [source]
+                elif source.ndim == 4:
+                    source = [source[i] for i in range(source.shape[0])]
+                else:
+                    raise ValueError("Unsupported numpy array shape for frames")
+            if not isinstance(source, (list, tuple)) or len(source) == 0:
+                raise ValueError("source frames must be a non-empty list/array of images")
+
+            frames = []
+            for f in source:
+                a = np.asarray(f)
+                if a.ndim != 3 or a.shape[2] != 3:
+                    raise ValueError("Each frame must be HxWx3 RGB")
+                if a.dtype != np.uint8:
+                    # Assume 0..1 floats and convert
+                    a = (a.astype(np.float32) * 255.0).clip(0, 255).astype(np.uint8)
+                frames.append(a)
+
+            # Resize once consistently based on first frame
+            h, w = frames[0].shape[:2]
+            new_h, new_w, rsz_flag = check_resize(h, w, max_dim)
+            if rsz_flag:
+                frames = [cv2.resize(f, (new_w, new_h)) for f in frames]
+
+            if n_frames > 0:
+                frames = frames[:n_frames]
+            rgb_list = frames
+            is_image_flag = len(rgb_list) == 1
         source_info = {
             "x_s_info_lst": [],
             "f_s_lst": [],

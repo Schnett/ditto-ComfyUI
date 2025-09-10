@@ -4,6 +4,8 @@ import time
 import json
 import math
 import librosa
+import numpy as np
+import torch
 
 BASE_DIR = os.path.dirname(__file__)
 
@@ -53,11 +55,12 @@ class DittoTalkingHead:
         return {
             "required": {
                 "audio_path": ("STRING", {"default": "", "multiline": False}),
-                "source_path": ("STRING", {"default": "", "multiline": False}),
+                "source_images": ("IMAGE", {}),
                 "data_root": ("STRING", {"default": DEFAULT_DATA_ROOT, "multiline": False}),
                 "cfg_pkl": ("STRING", {"default": DEFAULT_CFG_PKL, "multiline": False}),
             },
             "optional": {
+                "source_path": ("STRING", {"default": "", "multiline": False}),
                 "personalized_model_path": ("STRING", {"default": "", "multiline": False}),
                 "emo": ("STRING", {"default": "neutral", "multiline": False}),
                 "mouth_scale": ("FLOAT", {"default": 1.0, "min": 0.0, "max": 3.0, "step": 0.05}),
@@ -70,9 +73,10 @@ class DittoTalkingHead:
     def run(
         self,
         audio_path: str,
-        source_path: str,
+        source_images,  # ComfyUI IMAGE tensor: [T,H,W,C] in 0..1
         data_root: str,
         cfg_pkl: str,
+        source_path: str = "",
         personalized_model_path: str = "",
         emo: str = "neutral",
         mouth_scale: float = 1.0,
@@ -82,9 +86,33 @@ class DittoTalkingHead:
     ):
         if not os.path.isfile(audio_path):
             raise FileNotFoundError(f"audio_path not found: {audio_path}")
-        
-        if not os.path.isfile(source_path):
-            raise FileNotFoundError(f"source_path not found: {source_path}")
+
+        # Prepare source frames: prefer provided IMAGE tensor; fallback to source_path
+        source = None
+        img_base_for_name = ""
+        if source_images is not None:
+            # Expect torch.Tensor [T,H,W,C] or [1,H,W,C], float32 0..1
+            if isinstance(source_images, torch.Tensor):
+                t = source_images
+            else:
+                # Some nodes might wrap; try to convert
+                try:
+                    t = torch.tensor(source_images)
+                except Exception:
+                    raise TypeError("source_images must be a torch.Tensor or tensor-like array")
+            if t.dim() == 3:
+                t = t.unsqueeze(0)
+            np_imgs = (t.detach().cpu().numpy() * 255.0).clip(0, 255).astype(np.uint8)
+            # Convert to list of HxWx3 RGB frames
+            source = [np_imgs[i] for i in range(np_imgs.shape[0])]
+            img_base_for_name = f"frames{len(source)}"
+        elif source_path:
+            if not os.path.isfile(source_path):
+                raise FileNotFoundError(f"source_path not found: {source_path}")
+            source = source_path
+            img_base_for_name = os.path.splitext(os.path.basename(source_path))[0]
+        else:
+            raise ValueError("Provide either source_images (IMAGE) or a valid source_path.")
 
         setup_kwargs = {}
         if personalized_model_path:
@@ -111,7 +139,7 @@ class DittoTalkingHead:
             os.makedirs(base_out, exist_ok=True)
             # Extract base names without extension
             audio_base = os.path.splitext(os.path.basename(audio_path))[0]
-            img_base = os.path.splitext(os.path.basename(source_path))[0]
+            img_base = img_base_for_name or "image"
             emo_str = str(emo) if emo else "neutral"
             m_str = f"m{mouth_scale}" if mouth_scale is not None else "m1.0"
             h_str = f"h{head_scale}" if head_scale is not None else "h1.0"
@@ -123,7 +151,7 @@ class DittoTalkingHead:
             output_path = os.path.join(base_out, fname)
 
         SDK = StreamSDK(cfg_pkl, data_root)
-        SDK.setup(source_path, output_path, **setup_kwargs)
+        SDK.setup(source, output_path, **setup_kwargs)
 
         audio, sr = librosa.core.load(audio_path, sr=16000)
         num_f = math.ceil(len(audio) / 16000 * 25)
@@ -135,7 +163,7 @@ class DittoTalkingHead:
 
         cmd = f'ffmpeg -loglevel error -y -i "{SDK.tmp_output_path}" -i "{audio_path}" -map 0:v -map 1:a -c:v copy -c:a aac "{output_path}"'
         os.system(cmd)
-        
+
         try:
             if os.path.exists(SDK.tmp_output_path):
                 os.remove(SDK.tmp_output_path)
