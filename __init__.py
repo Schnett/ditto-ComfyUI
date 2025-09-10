@@ -60,6 +60,7 @@ class DittoTalkingHead:
                 "cfg_pkl": ("STRING", {"default": DEFAULT_CFG_PKL, "multiline": False}),
             },
             "optional": {
+                "audio": ("AUDIO", {}),
                 "source_path": ("STRING", {"default": "", "multiline": False}),
                 "personalized_model_path": ("STRING", {"default": "", "multiline": False}),
                 "emo": ("STRING", {"default": "neutral", "multiline": False}),
@@ -76,6 +77,7 @@ class DittoTalkingHead:
         source_images,  # ComfyUI IMAGE tensor: [T,H,W,C] in 0..1
         data_root: str,
         cfg_pkl: str,
+        audio=None,
         source_path: str = "",
         personalized_model_path: str = "",
         emo: str = "neutral",
@@ -84,8 +86,36 @@ class DittoTalkingHead:
         smooth_motion_k: int = 13,
         output_path: str = "",
     ):
-        if not os.path.isfile(audio_path):
-            raise FileNotFoundError(f"audio_path not found: {audio_path}")
+        # Prepare audio: prefer AUDIO input; fallback to audio_path
+        audio_np = None
+        audio_base_for_name = ""
+        if isinstance(audio, dict) and "waveform" in audio and "sample_rate" in audio:
+            wf = audio["waveform"]  # [B,C,T] or [C,T]
+            sr_in = int(audio["sample_rate"])
+            if isinstance(wf, torch.Tensor):
+                t = wf.detach().cpu()
+            else:
+                t = torch.tensor(wf)
+            if t.dim() == 3:
+                t = t[0]  # first batch -> [C,T]
+            if t.dim() != 2:
+                raise ValueError("AUDIO.waveform must be 2D or 3D tensor")
+            # to mono
+            if t.shape[0] > 1:
+                t = t.mean(0)
+            else:
+                t = t[0]
+            audio_np = t.numpy().astype(np.float32)
+            if sr_in != 16000:
+                audio_np = librosa.core.resample(audio_np, orig_sr=sr_in, target_sr=16000)
+            audio_base_for_name = f"audio{len(audio_np)}"
+        else:
+            if not audio_path:
+                raise FileNotFoundError("Provide either 'audio' (AUDIO) or a valid 'audio_path'.")
+            if not os.path.isfile(audio_path):
+                raise FileNotFoundError(f"audio_path not found: {audio_path}")
+            audio_np, sr = librosa.core.load(audio_path, sr=16000)
+            audio_base_for_name = os.path.splitext(os.path.basename(audio_path))[0]
 
         # Prepare source frames: prefer provided IMAGE tensor; fallback to source_path
         source = None
@@ -138,7 +168,7 @@ class DittoTalkingHead:
             base_out = os.path.join(os.getcwd(), "output")
             os.makedirs(base_out, exist_ok=True)
             # Extract base names without extension
-            audio_base = os.path.splitext(os.path.basename(audio_path))[0]
+            audio_base = audio_base_for_name or (os.path.splitext(os.path.basename(audio_path))[0] if audio_path else "audio")
             img_base = img_base_for_name or "image"
             emo_str = str(emo) if emo else "neutral"
             m_str = f"m{mouth_scale}" if mouth_scale is not None else "m1.0"
@@ -153,16 +183,33 @@ class DittoTalkingHead:
         SDK = StreamSDK(cfg_pkl, data_root)
         SDK.setup(source, output_path, **setup_kwargs)
 
-        audio, sr = librosa.core.load(audio_path, sr=16000)
-        num_f = math.ceil(len(audio) / 16000 * 25)
+        num_f = math.ceil(len(audio_np) / 16000 * 25)
         SDK.setup_Nd(N_d=num_f, fade_in=-1, fade_out=-1, ctrl_info={})
 
-        aud_feat = SDK.wav2feat.wav2feat(audio)
+        aud_feat = SDK.wav2feat.wav2feat(audio_np)
         SDK.audio2motion_queue.put(aud_feat)
         SDK.close()
 
-        cmd = f'ffmpeg -loglevel error -y -i "{SDK.tmp_output_path}" -i "{audio_path}" -map 0:v -map 1:a -c:v copy -c:a aac "{output_path}"'
-        os.system(cmd)
+        # Mux audio into final video
+        if isinstance(audio, dict) and "waveform" in audio and "sample_rate" in audio:
+            try:
+                import soundfile as sf
+                tmp_wav = SDK.tmp_output_path + ".tmp.wav"
+                sf.write(tmp_wav, audio_np, 16000)
+                cmd = f'ffmpeg -loglevel error -y -i "{SDK.tmp_output_path}" -i "{tmp_wav}" -map 0:v -map 1:a -c:v copy -c:a aac "{output_path}"'
+                os.system(cmd)
+                try:
+                    if os.path.exists(tmp_wav):
+                        os.remove(tmp_wav)
+                except Exception:
+                    pass
+            except Exception:
+                # Fallback: write video without audio
+                cmd = f'ffmpeg -loglevel error -y -i "{SDK.tmp_output_path}" -c:v copy "{output_path}"'
+                os.system(cmd)
+        else:
+            cmd = f'ffmpeg -loglevel error -y -i "{SDK.tmp_output_path}" -i "{audio_path}" -map 0:v -map 1:a -c:v copy -c:a aac "{output_path}"'
+            os.system(cmd)
 
         try:
             if os.path.exists(SDK.tmp_output_path):
