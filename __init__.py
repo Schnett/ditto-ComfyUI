@@ -7,6 +7,7 @@ import librosa
 import numpy as np
 import torch
 import wave
+import folder_paths
 
 BASE_DIR = os.path.dirname(__file__)
 
@@ -66,7 +67,7 @@ class DittoTalkingHead:
                 "mouth_scale": ("FLOAT", {"default": 1.0, "min": 0.0, "max": 3.0, "step": 0.05}),
                 "head_scale": ("FLOAT", {"default": 1.0, "min": 0.0, "max": 3.0, "step": 0.05}),
                 "smooth_motion_k": ("INT", {"default": 13, "min": 1, "max": 30, "step": 1}),
-                "output_path": ("STRING", {"default": "", "multiline": False}),
+                "output_filename": ("STRING", {"default": "", "multiline": False}),
             }
         }
 
@@ -81,7 +82,7 @@ class DittoTalkingHead:
         mouth_scale: float = 1.0,
         head_scale: float = 1.0,
         smooth_motion_k: int = 13,
-        output_path: str = "",
+        output_filename: str = "",
     ):
         # Prepare audio from AUDIO input
         if not (isinstance(audio, dict) and "waveform" in audio and "sample_rate" in audio):
@@ -148,21 +149,30 @@ class DittoTalkingHead:
         if use_d_keys:
             setup_kwargs["use_d_keys"] = use_d_keys
 
-        if not output_path:
-            base_out = os.path.join(os.getcwd(), "output")
-            os.makedirs(base_out, exist_ok=True)
-            # Extract base names without extension
+        # Determine base output directory from ComfyUI settings
+        base_out = folder_paths.get_output_directory()
+        os.makedirs(base_out, exist_ok=True)
+
+        # Resolve final output path based on provided filename or default pattern
+        if not output_filename:
             audio_base = audio_base_for_name or "audio"
             img_base = img_base_for_name or "image"
             emo_str = str(emo) if emo else "neutral"
             m_str = f"m{mouth_scale}" if mouth_scale is not None else "m1.0"
             h_str = f"h{head_scale}" if head_scale is not None else "h1.0"
             model_base = os.path.splitext(os.path.basename(personalized_model_path))[0] if personalized_model_path else "none"
-            # Sanitize for filename (remove problematic chars)
+
             def safe(s):
                 return str(s).replace(" ", "_").replace("/", "_").replace("\\", "_")
+
             fname = f"{safe(audio_base)}_{safe(img_base)}_{safe(emo_str)}_{m_str}_{h_str}_{safe(model_base)}.mp4"
             output_path = os.path.join(base_out, fname)
+        else:
+            # Use provided file name; ensure .mp4 extension and strip any directory components
+            name = os.path.basename(str(output_filename).strip())
+            if not name.lower().endswith(".mp4"):
+                name += ".mp4"
+            output_path = os.path.join(base_out, name)
 
         SDK = StreamSDK(cfg_pkl, data_root)
         SDK.setup(source, output_path, **setup_kwargs)
