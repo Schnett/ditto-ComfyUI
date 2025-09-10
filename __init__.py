@@ -6,6 +6,7 @@ import math
 import librosa
 import numpy as np
 import torch
+import wave
 
 BASE_DIR = os.path.dirname(__file__)
 
@@ -54,14 +55,12 @@ class DittoTalkingHead:
     def INPUT_TYPES(cls):
         return {
             "required": {
-                "audio_path": ("STRING", {"default": "", "multiline": False}),
                 "source_images": ("IMAGE", {}),
+                "audio": ("AUDIO", {}),
                 "data_root": ("STRING", {"default": DEFAULT_DATA_ROOT, "multiline": False}),
                 "cfg_pkl": ("STRING", {"default": DEFAULT_CFG_PKL, "multiline": False}),
             },
             "optional": {
-                "audio": ("AUDIO", {}),
-                "source_path": ("STRING", {"default": "", "multiline": False}),
                 "personalized_model_path": ("STRING", {"default": "", "multiline": False}),
                 "emo": ("STRING", {"default": "neutral", "multiline": False}),
                 "mouth_scale": ("FLOAT", {"default": 1.0, "min": 0.0, "max": 3.0, "step": 0.05}),
@@ -73,12 +72,10 @@ class DittoTalkingHead:
 
     def run(
         self,
-        audio_path: str,
         source_images,  # ComfyUI IMAGE tensor: [T,H,W,C] in 0..1
+        audio,  # ComfyUI AUDIO dict: {waveform: Tensor[B,C,T], sample_rate: int}
         data_root: str,
         cfg_pkl: str,
-        audio=None,
-        source_path: str = "",
         personalized_model_path: str = "",
         emo: str = "neutral",
         mouth_scale: float = 1.0,
@@ -86,36 +83,28 @@ class DittoTalkingHead:
         smooth_motion_k: int = 13,
         output_path: str = "",
     ):
-        # Prepare audio: prefer AUDIO input; fallback to audio_path
-        audio_np = None
-        audio_base_for_name = ""
-        if isinstance(audio, dict) and "waveform" in audio and "sample_rate" in audio:
-            wf = audio["waveform"]  # [B,C,T] or [C,T]
-            sr_in = int(audio["sample_rate"])
-            if isinstance(wf, torch.Tensor):
-                t = wf.detach().cpu()
-            else:
-                t = torch.tensor(wf)
-            if t.dim() == 3:
-                t = t[0]  # first batch -> [C,T]
-            if t.dim() != 2:
-                raise ValueError("AUDIO.waveform must be 2D or 3D tensor")
-            # to mono
-            if t.shape[0] > 1:
-                t = t.mean(0)
-            else:
-                t = t[0]
-            audio_np = t.numpy().astype(np.float32)
-            if sr_in != 16000:
-                audio_np = librosa.core.resample(audio_np, orig_sr=sr_in, target_sr=16000)
-            audio_base_for_name = f"audio{len(audio_np)}"
+        # Prepare audio from AUDIO input
+        if not (isinstance(audio, dict) and "waveform" in audio and "sample_rate" in audio):
+            raise ValueError("'audio' input is required and must be an AUDIO dict with waveform and sample_rate")
+        wf = audio["waveform"]  # [B,C,T] or [C,T]
+        sr_in = int(audio["sample_rate"])
+        if isinstance(wf, torch.Tensor):
+            t = wf.detach().cpu()
         else:
-            if not audio_path:
-                raise FileNotFoundError("Provide either 'audio' (AUDIO) or a valid 'audio_path'.")
-            if not os.path.isfile(audio_path):
-                raise FileNotFoundError(f"audio_path not found: {audio_path}")
-            audio_np, sr = librosa.core.load(audio_path, sr=16000)
-            audio_base_for_name = os.path.splitext(os.path.basename(audio_path))[0]
+            t = torch.tensor(wf)
+        if t.dim() == 3:
+            t = t[0]  # first batch -> [C,T]
+        if t.dim() != 2:
+            raise ValueError("AUDIO.waveform must be 2D or 3D tensor")
+        # to mono
+        if t.shape[0] > 1:
+            t = t.mean(0)
+        else:
+            t = t[0]
+        audio_np = t.numpy().astype(np.float32)
+        if sr_in != 16000:
+            audio_np = librosa.core.resample(audio_np, orig_sr=sr_in, target_sr=16000)
+        audio_base_for_name = f"audio{len(audio_np)}"
 
         # Prepare source frames: prefer provided IMAGE tensor; fallback to source_path
         source = None
@@ -136,13 +125,8 @@ class DittoTalkingHead:
             # Convert to list of HxWx3 RGB frames
             source = [np_imgs[i] for i in range(np_imgs.shape[0])]
             img_base_for_name = f"frames{len(source)}"
-        elif source_path:
-            if not os.path.isfile(source_path):
-                raise FileNotFoundError(f"source_path not found: {source_path}")
-            source = source_path
-            img_base_for_name = os.path.splitext(os.path.basename(source_path))[0]
         else:
-            raise ValueError("Provide either source_images (IMAGE) or a valid source_path.")
+            raise ValueError("'source_images' is required")
 
         setup_kwargs = {}
         if personalized_model_path:
@@ -168,7 +152,7 @@ class DittoTalkingHead:
             base_out = os.path.join(os.getcwd(), "output")
             os.makedirs(base_out, exist_ok=True)
             # Extract base names without extension
-            audio_base = audio_base_for_name or (os.path.splitext(os.path.basename(audio_path))[0] if audio_path else "audio")
+            audio_base = audio_base_for_name or "audio"
             img_base = img_base_for_name or "image"
             emo_str = str(emo) if emo else "neutral"
             m_str = f"m{mouth_scale}" if mouth_scale is not None else "m1.0"
@@ -190,25 +174,27 @@ class DittoTalkingHead:
         SDK.audio2motion_queue.put(aud_feat)
         SDK.close()
 
-        # Mux audio into final video
-        if isinstance(audio, dict) and "waveform" in audio and "sample_rate" in audio:
+        # Mux audio into final video using a temporary WAV (no external deps)
+        try:
+            tmp_wav = SDK.tmp_output_path + ".tmp.wav"
+            # Write 16k mono int16 WAV
+            pcm16 = (np.clip(audio_np, -1.0, 1.0) * 32767.0).round().astype(np.int16)
+            with wave.open(tmp_wav, 'wb') as wf_out:
+                wf_out.setnchannels(1)
+                wf_out.setsampwidth(2)  # 16-bit
+                wf_out.setframerate(16000)
+                wf_out.writeframes(pcm16.tobytes())
+
+            cmd = f'ffmpeg -loglevel error -y -i "{SDK.tmp_output_path}" -i "{tmp_wav}" -map 0:v -map 1:a -c:v copy -c:a aac "{output_path}"'
+            os.system(cmd)
             try:
-                import soundfile as sf
-                tmp_wav = SDK.tmp_output_path + ".tmp.wav"
-                sf.write(tmp_wav, audio_np, 16000)
-                cmd = f'ffmpeg -loglevel error -y -i "{SDK.tmp_output_path}" -i "{tmp_wav}" -map 0:v -map 1:a -c:v copy -c:a aac "{output_path}"'
-                os.system(cmd)
-                try:
-                    if os.path.exists(tmp_wav):
-                        os.remove(tmp_wav)
-                except Exception:
-                    pass
+                if os.path.exists(tmp_wav):
+                    os.remove(tmp_wav)
             except Exception:
-                # Fallback: write video without audio
-                cmd = f'ffmpeg -loglevel error -y -i "{SDK.tmp_output_path}" -c:v copy "{output_path}"'
-                os.system(cmd)
-        else:
-            cmd = f'ffmpeg -loglevel error -y -i "{SDK.tmp_output_path}" -i "{audio_path}" -map 0:v -map 1:a -c:v copy -c:a aac "{output_path}"'
+                pass
+        except Exception:
+            # Fallback: write video without audio
+            cmd = f'ffmpeg -loglevel error -y -i "{SDK.tmp_output_path}" -c:v copy "{output_path}"'
             os.system(cmd)
 
         try:
