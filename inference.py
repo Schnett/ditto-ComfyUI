@@ -66,12 +66,18 @@ def run(SDK: StreamSDK, audio_path: str, source_path: str, output_path: str, mor
 if __name__ == "__main__":
     import argparse
     parser = argparse.ArgumentParser()
-    parser.add_argument("--data_root", type=str, default="./checkpoints/ditto_trt_Ampere_Plus", help="path to trt data_root")
-    parser.add_argument("--cfg_pkl", type=str, default="./checkpoints/ditto_cfg/v0.4_hubert_cfg_trt.pkl", help="path to cfg_pkl")
+    parser.add_argument("--data_root", type=str, default="./checkpoints/ditto_pytorch/", help="path to trt data_root")
+    parser.add_argument("--cfg_pkl", type=str, default="./checkpoints/ditto_cfg/v0.4_hubert_cfg_pytorch.pkl", help="path to cfg_pkl")
 
     parser.add_argument("--audio_path", type=str, help="path to input wav")
     parser.add_argument("--source_path", type=str, help="path to input image")
     parser.add_argument("--output_path", type=str, help="path to output mp4")
+    parser.add_argument("--personalized_model_path", type=str, default=None, help="Path to custom fine-tuned model (optional)")
+    # Keep only the essential expressiveness controls
+    parser.add_argument("--emo", type=str, default=None, help="Emotion(s): index 0-7 or names: angry,disgust,fear,happy,neutral,sad,surprise,contempt. neutral default")
+    parser.add_argument("--mouth_scale", type=float, default=None, help="Scale mouth/expression (exp). 1.0 default")
+    parser.add_argument("--head_scale", type=float, default=None, help="Uniform scale for head pose (pitch,yaw,roll). 1.0 default")
+    parser.add_argument("--smooth_motion_k", type=int, default=None, help="Temporal smoothing kernel for dynamics (smo_k_d). Lower values = more movement. Higher values = less movement. 13.0 default")
     args = parser.parse_args()
 
     # init sdk
@@ -84,6 +90,51 @@ if __name__ == "__main__":
     source_path = args.source_path   # video|image
     output_path = args.output_path   # .mp4
 
+    # Build setup/run kwargs from CLI
+    setup_kwargs = {}
+    if args.personalized_model_path:
+        setup_kwargs["personalized_model_path"] = args.personalized_model_path
+
+    # Emotion parsing
+    def parse_emo(arg: str | None):
+        if not arg:
+            return None
+        name_to_idx = {
+            "angry": 0, "disgust": 1, "fear": 2, "happy": 3,
+            "neutral": 4, "sad": 5, "surprise": 6, "contempt": 7,
+        }
+        parts = [p.strip().lower() for p in arg.split(',') if p.strip()]
+        idxs = []
+        for p in parts:
+            if p.isdigit():
+                i = int(p)
+                if 0 <= i <= 7:
+                    idxs.append(i)
+            elif p in name_to_idx:
+                idxs.append(name_to_idx[p])
+        if not idxs:
+            return None
+        return idxs[0] if len(idxs) == 1 else idxs
+
+    emo_val = parse_emo(args.emo)
+    if emo_val is not None:
+        setup_kwargs["emo"] = emo_val
+
+    # Motion smoothing control
+    if args.smooth_motion_k is not None:
+        setup_kwargs["smo_k_d"] = int(args.smooth_motion_k)
+
+    # Movement scales via use_d_keys
+    use_d_keys = {}
+    if args.mouth_scale is not None:
+        use_d_keys["exp"] = float(args.mouth_scale)
+    if args.head_scale is not None:
+        for k in ("pitch", "yaw", "roll"):
+            use_d_keys[k] = float(args.head_scale)
+    if use_d_keys:
+        setup_kwargs["use_d_keys"] = use_d_keys
+
     # run
     # seed_everything(1024)
-    run(SDK, audio_path, source_path, output_path)
+    # Pass setup_kwargs via more_kwargs
+    run(SDK, audio_path, source_path, output_path, more_kwargs={"setup_kwargs": setup_kwargs})

@@ -174,6 +174,15 @@ class StreamSDK:
             smo_k_d=self.smo_k_d,
         )
 
+        import os
+        import torch
+        # Load personalized model if available
+        model_path = kwargs.get("personalized_model_path", None)
+        if model_path and os.path.exists(model_path) and self.audio2motion.lmdm.model_type == "pytorch":
+            print(f"Loading personalized model from {model_path}")
+            # Load the state dict into the existing model
+            self.audio2motion.lmdm.model.load_state_dict(torch.load(model_path))
+
         # ======== Setup Motion Stitch ========
         is_image_flag = source_info["is_image_flag"]
         x_s_info = source_info['x_s_info_lst'][0]
