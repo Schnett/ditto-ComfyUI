@@ -62,7 +62,6 @@ class DittoTalkingHead:
                 "emo": ("STRING", {"default": "neutral", "multiline": False}),
                 "mouth_scale": ("FLOAT", {"default": 1.0, "min": 0.0, "max": 3.0, "step": 0.05}),
                 "head_scale": ("FLOAT", {"default": 1.0, "min": 0.0, "max": 3.0, "step": 0.05}),
-                "translation_scale": ("FLOAT", {"default": 1.0, "min": 0.0, "max": 3.0, "step": 0.05}),
                 "smooth_motion_k": ("INT", {"default": 13, "min": 1, "max": 30, "step": 1}),
                 "output_path": ("STRING", {"default": "", "multiline": False}),
             }
@@ -78,7 +77,6 @@ class DittoTalkingHead:
         emo: str = "neutral",
         mouth_scale: float = 1.0,
         head_scale: float = 1.0,
-        translation_scale: float = 1.0,
         smooth_motion_k: int = 13,
         output_path: str = "",
     ):
@@ -105,16 +103,24 @@ class DittoTalkingHead:
         if head_scale != 1.0:
             for k in ("pitch", "yaw", "roll"):
                 use_d_keys[k] = float(head_scale)
-        if translation_scale != 1.0:
-            use_d_keys["t"] = float(translation_scale)
         if use_d_keys:
             setup_kwargs["use_d_keys"] = use_d_keys
 
         if not output_path:
             base_out = os.path.join(os.getcwd(), "output")
             os.makedirs(base_out, exist_ok=True)
-            stamp = time.strftime("%Y%m%d_%H%M%S")
-            output_path = os.path.join(base_out, f"ditto_{stamp}.mp4")
+            # Extract base names without extension
+            audio_base = os.path.splitext(os.path.basename(audio_path))[0]
+            img_base = os.path.splitext(os.path.basename(source_path))[0]
+            emo_str = str(emo) if emo else "neutral"
+            m_str = f"m{mouth_scale}" if mouth_scale is not None else "m1.0"
+            h_str = f"h{head_scale}" if head_scale is not None else "h1.0"
+            model_base = os.path.splitext(os.path.basename(personalized_model_path))[0] if personalized_model_path else "none"
+            # Sanitize for filename (remove problematic chars)
+            def safe(s):
+                return str(s).replace(" ", "_").replace("/", "_").replace("\\", "_")
+            fname = f"{safe(audio_base)}_{safe(img_base)}_{safe(emo_str)}_{m_str}_{h_str}_{safe(model_base)}.mp4"
+            output_path = os.path.join(base_out, fname)
 
         SDK = StreamSDK(cfg_pkl, data_root)
         SDK.setup(source_path, output_path, **setup_kwargs)
@@ -129,6 +135,12 @@ class DittoTalkingHead:
 
         cmd = f'ffmpeg -loglevel error -y -i "{SDK.tmp_output_path}" -i "{audio_path}" -map 0:v -map 1:a -c:v copy -c:a aac "{output_path}"'
         os.system(cmd)
+        
+        try:
+            if os.path.exists(SDK.tmp_output_path):
+                os.remove(SDK.tmp_output_path)
+        except Exception:
+            pass
 
         return (output_path,)
 
