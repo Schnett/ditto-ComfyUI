@@ -66,7 +66,7 @@ class DittoTalkingHead:
                 "emo": ("STRING", {"default": "neutral", "multiline": False}),
                 "mouth_scale": ("FLOAT", {"default": 1.0, "min": 0.0, "max": 3.0, "step": 0.05}),
                 "head_scale": ("FLOAT", {"default": 1.0, "min": 0.0, "max": 3.0, "step": 0.05}),
-                "smooth_motion_k": ("INT", {"default": 13, "min": 1, "max": 30, "step": 1}),
+                "smooth_motion_k": ("INT", {"default": 3, "min": 1, "max": 20, "step": 1}),
                 "output_filename": ("STRING", {"default": "", "multiline": False}),
             }
         }
@@ -81,7 +81,7 @@ class DittoTalkingHead:
         emo: str = "neutral",
         mouth_scale: float = 1.0,
         head_scale: float = 1.0,
-        smooth_motion_k: int = 13,
+        smooth_motion_k: int = 3,
         output_filename: str = "",
     ):
         # Prepare audio from AUDIO input
