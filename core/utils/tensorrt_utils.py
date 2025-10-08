@@ -92,7 +92,7 @@ class TRTWrapper:
     def __init__(
         self,
         trt_file: str,
-        plugin_file_list: list = ["./checkpoints/plugins/grid_sample_3d_plugin.dll"],
+        plugin_file_list: list = [os.path.join(os.path.dirname(__file__), "../../checkpoints/plugins/grid_sample_3d_plugin.dll")],
     ) -> None:
         # Load custom plugins
         for plugin_file in plugin_file_list:
