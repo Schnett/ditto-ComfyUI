@@ -63,7 +63,7 @@ class DittoTalkingHead:
             },
             "optional": {
                 "personalized_model_path": ("STRING", {"default": "", "multiline": False}),
-                "emo": ("STRING", {"default": "neutral", "multiline": False}),
+                "emo": (["neutral", "angry", "disgust", "fear", "happy", "sad", "surprise", "contempt"], {"default": "neutral"}),
                 "mouth_scale": ("FLOAT", {"default": 1.0, "min": 0.0, "max": 3.0, "step": 0.05}),
                 "head_scale": ("FLOAT", {"default": 1.0, "min": 0.0, "max": 6.0, "step": 0.05}),
                 "smooth_motion_k": ("INT", {"default": 3, "min": 1, "max": 20, "step": 1}),

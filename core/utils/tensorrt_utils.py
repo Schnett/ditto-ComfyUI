@@ -112,7 +112,6 @@ class TRTWrapper:
         self.model = trt_file
         with open(trt_file, "rb") as f, trt.Runtime(logger) as runtime:
             assert runtime, "Failed to create TensorRT runtime."
-            runtime.temporary_directory = "./tmp_trt"
             self.engine = runtime.deserialize_cuda_engine(f.read())
         assert self.engine, "Failed to deserialize TensorRT engine."
 
